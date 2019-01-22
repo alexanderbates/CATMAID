@@ -99,9 +99,9 @@
     this._boundResourceLoaded = this._resourceLoaded.bind(this);
     this._concurrency = 16;
     this._counts = {};
-    this._loader = new PIXI.loaders.Loader('', this._concurrency);
-    this._loader.load();
-    this._loader._queue.empty = this._loadFromQueue.bind(this);
+    // Pixi's resource loader can't be changed when it is running. Therefore,
+    // multiple loaders are used in parallel.
+    this._loaders = [];
     this._loading = {};
     this._loadingQueue = [];
     this._loadingRequests = new Set();
@@ -150,23 +150,45 @@
     return request;
   };
 
+  function getQueueLength() {
+    return loader._queue.length();
+  }
+
   /**
    * Passes URLs from the TextureManager's loading queue to the loader.
    *
    * @private
    */
   PixiContext.TextureManager.prototype._loadFromQueue = function () {
-    var toDequeue = this._concurrency - this._loader._queue.length();
+    let totalActiveQueueLength = this._loaders.reduce(getQueueLength, 0);
+    var toDequeue = this._concurrency - totalActiveQueueLength;
     if (toDequeue < 1) return;
+    if (this._loadingQueue.length === 0) return;
+
+    // Pixi requires us to create a new (lightweight) loader for each queuing
+    // request.
+    let loader = new PIXI.loaders.Loader('', toDequeue);
+    loader._queue.empty = this._forgetLoader.bind(this, loader);
+    this._loaders.push(loader);
+
     var remainingQueue = this._loadingQueue.splice(toDequeue);
     this._loadingQueue.forEach(function (url) {
-      this._loader.add(url,
+      loader.add(url,
                        {crossOrigin: true,
                         xhrType: PIXI.loaders.Resource.XHR_RESPONSE_TYPE.BLOB},
                        this._boundResourceLoaded);
     }, this);
     this._loadingQueue = remainingQueue;
-    this._loader.load();
+    loader.load();
+  };
+
+  /**
+   * Remove empty loader for loader array.
+   */
+  PixiContext.TextureManager.prototype._forgetLoader = function (loader) {
+    let loaderIndex = this._loaders.indexOf(loader);
+    this._loaders.splice(loaderIndex, 1);
+    this._loadFromQueue();
   };
 
   /**
@@ -178,7 +200,6 @@
    */
   PixiContext.TextureManager.prototype._resourceLoaded = function (resource) {
     var url = resource.url;
-    delete this._loader.resources[url];
     var requests = this._loading[url];
     delete this._loading[url];
 
